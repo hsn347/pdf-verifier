@@ -497,7 +497,7 @@ function verifyPdf(buf, parsedData, expectedName, expectedAccount, expectedCurre
 // ============================================================
 //  🔄 Supabase: Duplicate Check + Registration
 // ============================================================
-async function checkAndRegisterReceipt(receiptNumber, destAccount, destName, amount, currency, date, fileSizeKB) {
+async function checkAndRegisterReceipt(receiptNumber, destAccount, destName, sourceName, amount, currency, date, fileSizeKB) {
     if (!supabase) {
         console.warn("⚠️ Supabase not configured — skipping duplicate check");
         return { isDuplicate: false, skipped: true };
@@ -518,7 +518,8 @@ async function checkAndRegisterReceipt(receiptNumber, destAccount, destName, amo
     const { error: insertErr } = await supabase.from("verified_receipts").insert({
         receipt_number: receiptNumber,
         dest_account: destAccount,
-        dest_name: destName,        // اسم المودع (المستلم)
+        dest_name: destName,        // اسم المستلم (المودَع له)
+        source_name: sourceName,    // اسم المودع
         amount,
         currency,
         receipt_date: date,
@@ -645,7 +646,8 @@ app.post("/verify", async (req, res) => {
             duplicateCheck = await checkAndRegisterReceipt(
                 result.extractedData.receiptNumber,
                 result.extractedData.destAccount,
-                result.extractedData.destName,      // اسم المودع
+                result.extractedData.destName,      // اسم المستلم
+                result.extractedData.sourceName,    // اسم المودع
                 result.extractedData.amount,
                 result.extractedData.currency,
                 result.extractedData.date,
