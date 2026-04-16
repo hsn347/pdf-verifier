@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS verified_receipts (
     id              BIGSERIAL PRIMARY KEY,
     receipt_number  TEXT NOT NULL UNIQUE,   -- رقم الإشعار (مثال: 8-168661341)
     dest_account    TEXT,                   -- رقم حساب المستلم
+    dest_name       TEXT,                   -- اسم المستلم (المودَع له)
     amount          TEXT,                   -- المبلغ المودع (أرقام فقط)
     currency        TEXT,                   -- العملة (مثال: ريال يمني)
     receipt_date    TEXT,                   -- تاريخ الإيصال (YYYY/MM/DD)
@@ -44,7 +45,8 @@ CREATE POLICY "deny_public_access" ON verified_receipts
     USING (false);
 
 -- ============================================================
---  ℹ️ إذا كان الجدول موجوداً مسبقاً بدون عمود currency
---  شغّل هذا الأمر فقط لإضافة العمود:
+--  ℹ️ إذا كان الجدول موجوداً مسبقاً — شغّل هذه الأوامر فقط
+--  لإضافة الأعمدة الجديدة دون حذف البيانات:
 -- ============================================================
--- ALTER TABLE verified_receipts ADD COLUMN IF NOT EXISTS currency TEXT;
+ALTER TABLE verified_receipts ADD COLUMN IF NOT EXISTS currency  TEXT;
+ALTER TABLE verified_receipts ADD COLUMN IF NOT EXISTS dest_name TEXT;
