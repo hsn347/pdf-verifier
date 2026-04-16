@@ -10,17 +10,18 @@ CREATE TABLE IF NOT EXISTS verified_receipts (
     id              BIGSERIAL PRIMARY KEY,
     receipt_number  TEXT NOT NULL UNIQUE,   -- رقم الإشعار (مثال: 8-168661341)
     dest_account    TEXT,                   -- رقم حساب المستلم
-    amount          TEXT,                   -- المبلغ المودع
+    amount          TEXT,                   -- المبلغ المودع (أرقام فقط)
+    currency        TEXT,                   -- العملة (مثال: ريال يمني)
     receipt_date    TEXT,                   -- تاريخ الإيصال (YYYY/MM/DD)
     file_size_kb    NUMERIC(10,2),          -- حجم الملف (للمرجع)
     verified_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()  -- وقت التحقق
 );
 
--- فهرس سريع على رقم الإشعار (هو الأكثر استخداماً في البحث)
+-- فهرس سريع على رقم الإشعار (الأكثر استخداماً في البحث)
 CREATE INDEX IF NOT EXISTS idx_verified_receipts_receipt_number
     ON verified_receipts (receipt_number);
 
--- فهرس على رقم حساب المستلم (للبحث والتقارير)
+-- فهرس على رقم حساب المستلم
 CREATE INDEX IF NOT EXISTS idx_verified_receipts_dest_account
     ON verified_receipts (dest_account);
 
@@ -31,14 +32,19 @@ CREATE INDEX IF NOT EXISTS idx_verified_receipts_verified_at
 -- ============================================================
 --  🔒 Row Level Security (RLS)
 --  الخدمة تستخدم service_role key فقط → تجاوز RLS تلقائياً
---  لكن نُفعّل RLS ونمنع الوصول العام لأمان إضافي
+--  نُفعّل RLS ونمنع الوصول العام لأمان إضافي
 -- ============================================================
 
 ALTER TABLE verified_receipts ENABLE ROW LEVEL SECURITY;
 
--- لا يُسمح بأي عملية قراءة/كتابة عبر anon key
--- (الوصول يتم فقط عبر service_role key من الخادم)
+-- لا يُسمح بأي عملية عبر anon key
 CREATE POLICY "deny_public_access" ON verified_receipts
     FOR ALL
     TO anon
     USING (false);
+
+-- ============================================================
+--  ℹ️ إذا كان الجدول موجوداً مسبقاً بدون عمود currency
+--  شغّل هذا الأمر فقط لإضافة العمود:
+-- ============================================================
+-- ALTER TABLE verified_receipts ADD COLUMN IF NOT EXISTS currency TEXT;

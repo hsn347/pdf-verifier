@@ -531,6 +531,33 @@ async function checkAndRegisterReceipt(receiptNumber, destAccount, amount, curre
 }
 
 // ============================================================
+//  📦 Unified Response Builder
+//  EVERY response — success, rejection, or error — uses this.
+//  Shape is always identical so n8n never has to guess.
+// ============================================================
+function buildResponse({
+  valid,
+  confidence = 0,
+  rejectionType = null,   // machine-readable rejection code
+  rejectionReason = null, // human-readable Arabic reason
+  criticalFailures = [],
+  layers = [],
+  extractedData = null,
+  registeredInDatabase = false,
+} = {}) {
+  return {
+    valid,
+    confidence,
+    rejectionType,       // null when valid
+    rejectionReason,     // null when valid
+    criticalFailures,
+    layers,
+    extractedData,
+    registeredInDatabase,
+  };
+}
+
+// ============================================================
 //  🚀 Express Routes
 // ============================================================
 app.post("/verify", async (req, res) => {
@@ -538,14 +565,14 @@ app.post("/verify", async (req, res) => {
     const { file_url, expected_name, expected_account, expected_currency } = req.body;
 
     if (!file_url || !expected_name || !expected_account) {
-      return res.status(400).json({
+      return res.status(400).json(buildResponse({
         valid: false,
-        error: "الحقول المطلوبة: file_url, expected_name, expected_account",
-        hint: "expected_currency اختياري لكن يُوصى به بشدة لأمان إضافي",
-      });
+        rejectionType: "MISSING_PARAMS",
+        rejectionReason: "الحقول المطلوبة: file_url, expected_name, expected_account — ملاحظة: expected_currency اختياري لكن يُوصى به",
+      }));
     }
 
-    // Download PDF
+    // ── Download PDF ─────────────────────────────────────────
     let response;
     try {
       response = await axios.get(file_url, {
@@ -554,40 +581,70 @@ app.post("/verify", async (req, res) => {
         maxContentLength: 10 * 1024 * 1024,
       });
     } catch (downloadErr) {
-      return res.status(400).json({ valid: false, error: "فشل تحميل ملف PDF", detail: downloadErr.message });
+      return res.status(400).json(buildResponse({
+        valid: false,
+        rejectionType: "DOWNLOAD_ERROR",
+        rejectionReason: `فشل تحميل ملف PDF من الرابط المُقدَّم — ${downloadErr.message}`,
+      }));
     }
 
     const buf = Buffer.from(response.data);
 
+    // ── PDF Magic Bytes ───────────────────────────────────────
     if (buf.slice(0, 4).toString("ascii") !== "%PDF") {
-      return res.status(422).json({ valid: false, error: "الملف ليس PDF صحيحاً", confidence: 0 });
+      return res.status(422).json(buildResponse({
+        valid: false,
+        rejectionType: "INVALID_PDF",
+        rejectionReason: "الملف المُرسَل ليس ملف PDF صحيحاً — تحقق من الرابط",
+      }));
     }
 
+    // ── Parse PDF Text ───────────────────────────────────────
     let parsedData;
     try {
       parsedData = await pdf(buf);
     } catch (parseErr) {
-      return res.status(422).json({ valid: false, error: "تعذّر قراءة PDF — الملف تالف", detail: parseErr.message });
-    }
-
-    // Fast early rejection for transfer receipts
-    if (parsedData.text.includes(BANK_FINGERPRINT.transferKeyword)) {
-      return res.status(422).json({
+      return res.status(422).json(buildResponse({
         valid: false,
-        error: "❌ مرفوض: الإيصال المقدَّم هو إيصال حوالة (تحويل خارجي) وليس إيداعاً. يُقبل فقط إيصال الإيداع المباشر بين الحسابات داخل البنك.",
-        type: "TRANSFER_RECEIPT_REJECTED",
-        confidence: 0,
-      });
+        rejectionType: "INVALID_PDF",
+        rejectionReason: `تعذّر قراءة محتوى PDF — الملف تالف أو مشفّر — ${parseErr.message}`,
+      }));
     }
 
-    // Run all 9 verification layers
+    // ── Fast Rejection: Transfer Receipt ─────────────────────
+    if (parsedData.text.includes(BANK_FINGERPRINT.transferKeyword)) {
+      return res.status(422).json(buildResponse({
+        valid: false,
+        confidence: 0,
+        rejectionType: "TRANSFER_RECEIPT_REJECTED",
+        rejectionReason:
+          "الإيصال المُقدَّم هو إيصال حوالة (تحويل خارجي) وليس إيداعاً. " +
+          "يُقبل فقط إيصال الإيداع المباشر بين الحسابات داخل نفس البنك.",
+      }));
+    }
+
+    // ── Run All 9 Verification Layers ────────────────────────
     const result = verifyPdf(buf, parsedData, expected_name, expected_account, expected_currency);
 
     if (!result.valid) {
-      return res.status(422).json(result);
+      // Build a clear single-line rejection reason from the critical failures
+      const reasons = result.criticalFailures
+        .flatMap((cf) => cf.failedChecks.map((fc) => fc.detail))
+        .filter(Boolean)
+        .join(" | ");
+
+      return res.status(422).json(buildResponse({
+        valid: false,
+        confidence: result.confidence,
+        rejectionType: "VERIFICATION_FAILED",
+        rejectionReason: reasons || "فشل التحقق من الإيصال — راجع تفاصيل الطبقات",
+        criticalFailures: result.criticalFailures,
+        layers: result.layers,
+        extractedData: result.extractedData,
+      }));
     }
 
-    // Supabase duplicate check
+    // ── Supabase: Duplicate Check + Register ─────────────────
     let duplicateCheck;
     try {
       duplicateCheck = await checkAndRegisterReceipt(
@@ -599,27 +656,45 @@ app.post("/verify", async (req, res) => {
         result.extractedData.fileSizeKB
       );
     } catch (dbErr) {
-      return res.status(500).json({ valid: false, error: "خطأ في قاعدة البيانات", detail: dbErr.message });
+      return res.status(500).json(buildResponse({
+        valid: false,
+        rejectionType: "DATABASE_ERROR",
+        rejectionReason: `خطأ في قاعدة البيانات أثناء التحقق من الإيصال — ${dbErr.message}`,
+        extractedData: result.extractedData,
+      }));
     }
 
     if (duplicateCheck.isDuplicate) {
-      return res.status(422).json({
+      return res.status(422).json(buildResponse({
         valid: false,
-        error: `❌ مرفوض: تم استخدام هذا الإيصال مسبقاً في ${duplicateCheck.firstUsedAt}. لا يمكن استخدام نفس الإيصال مرتين.`,
-        type: "DUPLICATE_RECEIPT",
-        receiptNumber: result.extractedData.receiptNumber,
-        confidence: 0,
-      });
+        confidence: result.confidence,
+        rejectionType: "DUPLICATE_RECEIPT",
+        rejectionReason:
+          `تم استخدام الإيصال رقم ${result.extractedData.receiptNumber} مسبقاً في ` +
+          `${new Date(duplicateCheck.firstUsedAt).toLocaleString("ar-YE")}. ` +
+          `لا يُسمح باستخدام نفس الإيصال مرتين.`,
+        layers: result.layers,
+        extractedData: result.extractedData,
+      }));
     }
 
-    return res.status(200).json({
-      ...result,
+    // ── All Checks Passed ────────────────────────────────────
+    return res.status(200).json(buildResponse({
+      valid: true,
+      confidence: result.confidence,
+      criticalFailures: [],
+      layers: result.layers,
+      extractedData: result.extractedData,
       registeredInDatabase: !duplicateCheck.skipped,
-    });
+    }));
 
   } catch (err) {
     console.error("Unexpected error:", err);
-    res.status(500).json({ valid: false, error: "خطأ داخلي في الخادم", detail: err.message });
+    res.status(500).json(buildResponse({
+      valid: false,
+      rejectionType: "SERVER_ERROR",
+      rejectionReason: `خطأ داخلي في الخادم — ${err.message}`,
+    }));
   }
 });
 
