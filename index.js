@@ -531,26 +531,29 @@ async function checkAndRegisterReceipt(receiptNumber, destAccount, amount, curre
 }
 
 // ============================================================
-//  📦 Unified Response Builder
-//  EVERY response — success, rejection, or error — uses this.
-//  Shape is always identical so n8n never has to guess.
+//  📦 Response Builders
 // ============================================================
-function buildResponse({
-  valid,
-  confidence = 0,
-  rejectionType = null,   // machine-readable rejection code
-  rejectionReason = null, // human-readable Arabic reason
-  criticalFailures = [],
-  layers = [],
-  extractedData = null,
-  registeredInDatabase = false,
-} = {}) {
+
+/**
+ * REJECTION — slim payload for n8n:
+ *   only the reason + depositor name (if extracted)
+ */
+function rejectResponse(rejectionType, rejectionReason, depositorName = null) {
   return {
-    valid,
+    valid: false,
+    rejectionType,
+    rejectionReason,
+    depositorName,   // اسم المودع من الإيصال (إن أمكن استخراجه)
+  };
+}
+
+/**
+ * SUCCESS — full payload with all layers + extracted data
+ */
+function successResponse({ confidence, layers, extractedData, registeredInDatabase }) {
+  return {
+    valid: true,
     confidence,
-    rejectionType,       // null when valid
-    rejectionReason,     // null when valid
-    criticalFailures,
     layers,
     extractedData,
     registeredInDatabase,
@@ -565,11 +568,10 @@ app.post("/verify", async (req, res) => {
     const { file_url, expected_name, expected_account, expected_currency } = req.body;
 
     if (!file_url || !expected_name || !expected_account) {
-      return res.status(400).json(buildResponse({
-        valid: false,
-        rejectionType: "MISSING_PARAMS",
-        rejectionReason: "الحقول المطلوبة: file_url, expected_name, expected_account — ملاحظة: expected_currency اختياري لكن يُوصى به",
-      }));
+      return res.status(400).json(rejectResponse(
+        "MISSING_PARAMS",
+        "الحقول المطلوبة: file_url, expected_name, expected_account — ملاحظة: expected_currency اختياري لكن يُوصى به"
+      ));
     }
 
     // ── Download PDF ─────────────────────────────────────────
@@ -581,22 +583,20 @@ app.post("/verify", async (req, res) => {
         maxContentLength: 10 * 1024 * 1024,
       });
     } catch (downloadErr) {
-      return res.status(400).json(buildResponse({
-        valid: false,
-        rejectionType: "DOWNLOAD_ERROR",
-        rejectionReason: `فشل تحميل ملف PDF من الرابط المُقدَّم — ${downloadErr.message}`,
-      }));
+      return res.status(400).json(rejectResponse(
+        "DOWNLOAD_ERROR",
+        `فشل تحميل ملف PDF من الرابط المُقدَّم — ${downloadErr.message}`
+      ));
     }
 
     const buf = Buffer.from(response.data);
 
     // ── PDF Magic Bytes ───────────────────────────────────────
     if (buf.slice(0, 4).toString("ascii") !== "%PDF") {
-      return res.status(422).json(buildResponse({
-        valid: false,
-        rejectionType: "INVALID_PDF",
-        rejectionReason: "الملف المُرسَل ليس ملف PDF صحيحاً — تحقق من الرابط",
-      }));
+      return res.status(422).json(rejectResponse(
+        "INVALID_PDF",
+        "الملف المُرسَل ليس ملف PDF صحيحاً — تحقق من الرابط"
+      ));
     }
 
     // ── Parse PDF Text ───────────────────────────────────────
@@ -604,44 +604,38 @@ app.post("/verify", async (req, res) => {
     try {
       parsedData = await pdf(buf);
     } catch (parseErr) {
-      return res.status(422).json(buildResponse({
-        valid: false,
-        rejectionType: "INVALID_PDF",
-        rejectionReason: `تعذّر قراءة محتوى PDF — الملف تالف أو مشفّر — ${parseErr.message}`,
-      }));
+      return res.status(422).json(rejectResponse(
+        "INVALID_PDF",
+        `تعذّر قراءة محتوى PDF — الملف تالف أو مشفّر — ${parseErr.message}`
+      ));
     }
 
     // ── Fast Rejection: Transfer Receipt ─────────────────────
     if (parsedData.text.includes(BANK_FINGERPRINT.transferKeyword)) {
-      return res.status(422).json(buildResponse({
-        valid: false,
-        confidence: 0,
-        rejectionType: "TRANSFER_RECEIPT_REJECTED",
-        rejectionReason:
-          "الإيصال المُقدَّم هو إيصال حوالة (تحويل خارجي) وليس إيداعاً. " +
-          "يُقبل فقط إيصال الإيداع المباشر بين الحسابات داخل نفس البنك.",
-      }));
+      // Try to get sender name even from transfer receipt
+      const senderMatch = parsedData.text.match(/السيد:\s*([\u0600-\u06FF\s]+?)(?:\n|\/)/);
+      const senderName = senderMatch ? senderMatch[1].trim() : null;
+      return res.status(422).json(rejectResponse(
+        "TRANSFER_RECEIPT_REJECTED",
+        "الإيصال المُقدَّم هو إيصال حوالة (تحويل خارجي) وليس إيداعاً. يُقبل فقط إيصال الإيداع المباشر بين الحسابات داخل نفس البنك.",
+        senderName
+      ));
     }
 
     // ── Run All 9 Verification Layers ────────────────────────
     const result = verifyPdf(buf, parsedData, expected_name, expected_account, expected_currency);
 
     if (!result.valid) {
-      // Build a clear single-line rejection reason from the critical failures
       const reasons = result.criticalFailures
         .flatMap((cf) => cf.failedChecks.map((fc) => fc.detail))
         .filter(Boolean)
         .join(" | ");
 
-      return res.status(422).json(buildResponse({
-        valid: false,
-        confidence: result.confidence,
-        rejectionType: "VERIFICATION_FAILED",
-        rejectionReason: reasons || "فشل التحقق من الإيصال — راجع تفاصيل الطبقات",
-        criticalFailures: result.criticalFailures,
-        layers: result.layers,
-        extractedData: result.extractedData,
-      }));
+      return res.status(422).json(rejectResponse(
+        "VERIFICATION_FAILED",
+        reasons || "فشل التحقق من الإيصال",
+        result.extractedData?.destName || null
+      ));
     }
 
     // ── Supabase: Duplicate Check + Register ─────────────────
@@ -656,33 +650,26 @@ app.post("/verify", async (req, res) => {
         result.extractedData.fileSizeKB
       );
     } catch (dbErr) {
-      return res.status(500).json(buildResponse({
-        valid: false,
-        rejectionType: "DATABASE_ERROR",
-        rejectionReason: `خطأ في قاعدة البيانات أثناء التحقق من الإيصال — ${dbErr.message}`,
-        extractedData: result.extractedData,
-      }));
+      return res.status(500).json(rejectResponse(
+        "DATABASE_ERROR",
+        `خطأ في قاعدة البيانات أثناء التحقق من الإيصال — ${dbErr.message}`,
+        result.extractedData?.destName || null
+      ));
     }
 
     if (duplicateCheck.isDuplicate) {
-      return res.status(422).json(buildResponse({
-        valid: false,
-        confidence: result.confidence,
-        rejectionType: "DUPLICATE_RECEIPT",
-        rejectionReason:
-          `تم استخدام الإيصال رقم ${result.extractedData.receiptNumber} مسبقاً في ` +
-          `${new Date(duplicateCheck.firstUsedAt).toLocaleString("ar-YE")}. ` +
-          `لا يُسمح باستخدام نفس الإيصال مرتين.`,
-        layers: result.layers,
-        extractedData: result.extractedData,
-      }));
+      return res.status(422).json(rejectResponse(
+        "DUPLICATE_RECEIPT",
+        `تم استخدام الإيصال رقم ${result.extractedData.receiptNumber} مسبقاً في ` +
+        `${new Date(duplicateCheck.firstUsedAt).toLocaleString("ar-YE")}. ` +
+        `لا يُسمح باستخدام نفس الإيصال مرتين.`,
+        result.extractedData?.destName || null
+      ));
     }
 
-    // ── All Checks Passed ────────────────────────────────────
-    return res.status(200).json(buildResponse({
-      valid: true,
+    // ── All Checks Passed — return full data ─────────────────
+    return res.status(200).json(successResponse({
       confidence: result.confidence,
-      criticalFailures: [],
       layers: result.layers,
       extractedData: result.extractedData,
       registeredInDatabase: !duplicateCheck.skipped,
@@ -690,11 +677,10 @@ app.post("/verify", async (req, res) => {
 
   } catch (err) {
     console.error("Unexpected error:", err);
-    res.status(500).json(buildResponse({
-      valid: false,
-      rejectionType: "SERVER_ERROR",
-      rejectionReason: `خطأ داخلي في الخادم — ${err.message}`,
-    }));
+    res.status(500).json(rejectResponse(
+      "SERVER_ERROR",
+      `خطأ داخلي في الخادم — ${err.message}`
+    ));
   }
 });
 
