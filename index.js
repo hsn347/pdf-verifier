@@ -612,9 +612,10 @@ app.post("/verify", async (req, res) => {
 
     // ── Fast Rejection: Transfer Receipt ─────────────────────
     if (parsedData.text.includes(BANK_FINGERPRINT.transferKeyword)) {
-      // Try to get sender name even from transfer receipt
-      const senderMatch = parsedData.text.match(/السيد:\s*([\u0600-\u06FF\s]+?)(?:\n|\/)/);
-      const senderName = senderMatch ? senderMatch[1].trim() : null;
+      // استخراج اسم صاحب الحساب المُرسِل
+      // نفس طريقة split("/") المستخدمة في destName — الأكثر موثوقية مع نصوص PDF
+      const senderSection = parsedData.text.split("السيد:")[1] || "";
+      const senderName = senderSection.split("/")[0].replace(/[\n\r\s]+/g, " ").trim() || null;
       return res.status(422).json(rejectResponse(
         "TRANSFER_RECEIPT_REJECTED",
         "الإيصال المُقدَّم هو إيصال حوالة (تحويل خارجي) وليس إيداعاً. يُقبل فقط إيصال الإيداع المباشر بين الحسابات داخل نفس البنك.",
