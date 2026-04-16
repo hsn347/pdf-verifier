@@ -399,24 +399,28 @@ function verifyPdf(buf, parsedData, expectedName, expectedAccount, expectedCurre
     const layer9 = { name: "Currency Verification", checks: [], passed: 0, total: 0 };
     const extractedCurrency = extractCurrency(text);
 
+    // 1. MUST extract a currency
     chk(layer9, "Currency Extracted Successfully",
         !!extractedCurrency,
-        extractedCurrency ? `✅ العملة المستخرجة: "${extractedCurrency}"` : "❌ تعذّر استخراج العملة من الإيصال"
+        extractedCurrency ? `✅ العملة المستخرجة: "${extractedCurrency}"` : "❌ تعذّر استخراج العملة من الإيصال (قد يكون الإيصال مزوراً أو غير مكتمل)"
     );
 
-    // Currency consistency: must appear in BOTH the amount line AND the amount-in-words line
-    const amountLine = (text.match(/\n([^\n]*?)\[\s*[\d,]+\s*\]/)?.[1] || "").trim();
-    const amountWordsLine = (text.match(/\]\s*المبلغ\s*\n([^\n]+)/)?.[1] || "").trim();
-    const currencyConsistent = extractedCurrency &&
-        (normalizeArabic(amountWordsLine).includes(normalizeArabic(extractedCurrency)) ||
+    // 2. MUST be consistent if extracted
+    if (extractedCurrency) {
+        const amountLine = (text.match(/\n([^\n]*?)\[\s*[\d,]+\s*\]/)?.[1] || "").trim();
+        const amountWordsLine = (text.match(/\]\s*المبلغ\s*\n([^\n]+)/)?.[1] || "").trim();
+        const currencyConsistent = (normalizeArabic(amountWordsLine).includes(normalizeArabic(extractedCurrency)) ||
             normalizeArabic(amountLine).includes(normalizeArabic(extractedCurrency)));
-    chk(layer9, "Currency Consistent Within Receipt",
-        currencyConsistent,
-        currencyConsistent
-            ? `✅ العملة متسقة: "${extractedCurrency}" في سطر المبلغ`
-            : `❌ العملة غير متسقة أو مشبوهة`
-    );
+        
+        chk(layer9, "Currency Consistent Within Receipt",
+            currencyConsistent,
+            currencyConsistent
+                ? `✅ العملة متسقة: "${extractedCurrency}" في سطر المبلغ`
+                : `❌ العملة غير متسقة أو مشبوهة`
+        );
+    }
 
+    // 3. MUST match expected (if provided)
     if (expectedCurrency) {
         const currencyMatchResult = matchCurrency(expectedCurrency, extractedCurrency || "");
         chk(layer9, "Currency Matches Expected",
@@ -424,12 +428,6 @@ function verifyPdf(buf, parsedData, expectedName, expectedAccount, expectedCurre
             currencyMatchResult.match
                 ? `✅ العملة مطابقة (${currencyMatchResult.method}): "${extractedCurrency}"`
                 : `❌ العملة غير مطابقة — المتوقع: "${expectedCurrency}" | في الإيصال: "${extractedCurrency}"`
-        );
-    } else {
-        // No expected currency provided — we just report what we found (informational)
-        chk(layer9, "Expected Currency Provided",
-            false,
-            `⚠️ لم يتم تمرير expected_currency — العملة المستخرجة: "${extractedCurrency}" (يُنصح بإضافتها للأمان)`
         );
     }
 
@@ -459,9 +457,8 @@ function verifyPdf(buf, parsedData, expectedName, expectedAccount, expectedCurre
         "Receipt Type Verification (Deposit Only)",
         "Beneficiary Identity Verification",
         "Text Content Fingerprint",
+        "Currency Verification" // ALWAYS critical now
     ];
-    // Currency is critical ONLY if expected_currency was provided
-    if (expectedCurrency) criticalLayers.push("Currency Verification");
 
     const criticalFailed = layerSummaries.filter(
         (l) => criticalLayers.includes(l.layer) && l.score < 100
